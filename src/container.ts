@@ -13,24 +13,27 @@ export class Container {
     }
 
     resolve<T>(Target: Token<T>, path: Set<Function> = new Set()): T {
-        if (typeof Target !== 'function') {
-            if (!this.registeredTokens.has(Target)) {
-                throw new Error(`No provider registered for token`);
-            }
-
+        if (this.registeredTokens.has(Target)) {
             return this.registeredTokens.get(Target) as T;
-        } else {
-            if (!Reflect.getMetadata(INJECTABLE, Target)) {
-                throw new Error(`${Target} is not injectable`);
-            }
+        }
 
-            if (path.has(Target)) {
-                const cycle = [...path, Target]
-                    .map(item => item.name)
-                    .join(' -> ');
+        if (typeof Target !== 'function') {
+            const chain = [...path].map(item => item.name).join(' -> ');
+            const requestedVia = chain ? ` (requested via ${chain})` : '';
 
-                throw new Error(`Circular dependency: ${cycle}`);
-            }
+            throw new Error(`No provider registered for token: ${String(Target)}${requestedVia}`);
+        }
+
+        if (!Reflect.getOwnMetadata(INJECTABLE, Target)) {
+            throw new Error(`${Target.name} is not injectable`);
+        }
+
+        if (path.has(Target)) {
+            const cycle = [...path, Target]
+                .map(item => item.name)
+                .join(' -> ');
+
+            throw new Error(`Circular dependency: ${cycle}`);
         }
 
         const scope = Reflect.getMetadata(SCOPE, Target);
