@@ -7,7 +7,7 @@ export async function validateDto<T extends object>(
     body: unknown
 ): Promise<T> {
     const instance = plainToInstance(Dto, body);
-    const errors = await validate(instance);
+    const errors = await validate(instance, { whitelist: true });
 
     if (errors.length > 0) {
         const details = errors.map(err => ({

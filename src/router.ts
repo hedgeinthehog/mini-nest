@@ -2,14 +2,13 @@ import { CONTROLLER_PATH, IS_CONTROLLER } from "./decorators/controller.js";
 import { ROUTES_METADATA } from "./decorators/methods.js";
 import { Constructor } from "./container.js";
 
-const escapeRegExp = (str: string) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
 type Route = {
     method: string;
     path: string;
     handler: string;
     controller: Constructor;
-    pathRegex: RegExp;
+    pattern: URLPattern;
+    statusCode: number;
 }
 
 export class Router {
@@ -27,11 +26,9 @@ export class Router {
         for (const route of routes) {
             const fullPath = '/' + [prefix, route.path].filter(Boolean).join('/');
 
-            const pathRegex = new RegExp(
-                `^${escapeRegExp(fullPath).replace(/:([^/]+)/g, '(?<$1>[^/]+)')}$`
-            );
+            const pattern = new URLPattern({ pathname: fullPath });
 
-            this.routes.push({...route, path: fullPath, controller: Controller, pathRegex});
+            this.routes.push({...route, path: fullPath, controller: Controller, pattern});
         }
     }
 
@@ -39,10 +36,10 @@ export class Router {
         for (const route of this.routes) {
             if (route.method !== method) continue;
 
-            const match = route.pathRegex.exec(path);
+            const match = route.pattern.exec({ pathname: path });
             if (!match) continue;
 
-            return { route, params: {...match.groups} };
+            return { route, params: match.pathname.groups as Record<string, string> };
         }
 
         return { route: null, params: {} };

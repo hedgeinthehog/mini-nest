@@ -1,4 +1,4 @@
-FROM node:22-slim
+FROM node:24-slim
 
 WORKDIR /app
 
@@ -9,4 +9,3 @@ RUN npm ci
 COPY . .
 
 CMD ["npm", "test"]
-

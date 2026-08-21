@@ -38,10 +38,42 @@ describe('@Get / @Post', () => {
         const routes = Reflect.getMetadata(ROUTES_METADATA, UserController);
 
         expect(routes).toEqual(expect.arrayContaining([
-            {method: 'GET', path: '', handler: 'listUsers'},
-            {method: 'GET', path: ':id', handler: 'getUser'},
-            {method: 'POST', path: '', handler: 'createUser'},
+            {method: 'GET', path: '', handler: 'listUsers', statusCode: 200},
+            {method: 'GET', path: ':id', handler: 'getUser', statusCode: 200},
+            {method: 'POST', path: '', handler: 'createUser', statusCode: 201},
         ]));
+    });
+
+    it('defaults @Post to 201 and @Get to 200, but both are overridable', () => {
+        class WithOverride {
+            @Get('', 204)
+            noContent() {}
+        }
+
+        const [route] = Reflect.getOwnMetadata(ROUTES_METADATA, WithOverride);
+        expect(route.statusCode).toBe(204);
+    });
+
+    it('does not mutate the parent class route list when a subclass decorates its own method', () => {
+        class Base {
+            @Get('base')
+            baseRoute() {}
+        }
+
+        class Child extends Base {
+            @Post('child')
+            childRoute() {}
+        }
+
+        const baseRoutes = Reflect.getOwnMetadata(ROUTES_METADATA, Base);
+        const childRoutes = Reflect.getOwnMetadata(ROUTES_METADATA, Child);
+
+        // Child must get its own array — reading Base's routes afterwards
+        // must still show only what Base itself declared.
+        expect(baseRoutes).toHaveLength(1);
+        expect(baseRoutes[0].handler).toBe('baseRoute');
+        expect(childRoutes).toHaveLength(1);
+        expect(childRoutes[0].handler).toBe('childRoute');
     });
 });
 
@@ -150,5 +182,12 @@ describe('validateDto (ValidationPipe)', () => {
     it('rejects with a BadRequestError specifically, not a generic Error', async () => {
         await expect(validateDto(CreateUserDto, {email: 'not-an-email'}))
             .rejects.toBeInstanceOf(BadRequestError);
+    });
+
+    it('strips fields that are not declared on the DTO (mass-assignment guard)', async () => {
+        const dto = await validateDto(CreateUserDto, {email: 'a@b.com', role: 'admin'});
+
+        expect(dto).toEqual({email: 'a@b.com'});
+        expect('role' in dto).toBe(false);
     });
 });

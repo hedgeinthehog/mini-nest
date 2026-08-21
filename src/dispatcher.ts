@@ -71,7 +71,7 @@ export class Dispatcher {
 
             const result = await handler[route.handler](...args);
 
-            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.writeHead(route.statusCode, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(result));
         } catch (e) {
             if (e instanceof BadRequestError) {

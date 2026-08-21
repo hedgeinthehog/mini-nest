@@ -70,7 +70,7 @@ describe('HTTP', () => {
             body: JSON.stringify({email: 'dto@example.com'}),
         });
 
-        expect(response.status).toBeLessThan(300);
+        expect(response.status).toBe(201);
 
         const [receivedBody] = spy.mock.calls.at(-1)!;
         expect(receivedBody).toBeInstanceOf(CreateUserDto);
