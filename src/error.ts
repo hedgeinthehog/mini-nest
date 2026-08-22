@@ -3,3 +3,5 @@ export class BadRequestError extends Error {
         super(message);
     }
 }
+
+export class NotFoundError extends Error {}

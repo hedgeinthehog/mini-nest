@@ -2,7 +2,7 @@ import { CONTROLLER_PATH, IS_CONTROLLER } from "./decorators/controller.js";
 import { ROUTES_METADATA } from "./decorators/methods.js";
 import { Constructor } from "./container.js";
 
-type Route = {
+export type Route = {
     method: string;
     path: string;
     handler: string;
