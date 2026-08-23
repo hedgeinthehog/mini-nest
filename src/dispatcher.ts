@@ -2,10 +2,16 @@ import { ServerResponse, IncomingMessage } from "node:http";
 import { Route, Router } from "./router.js";
 import { Container } from "./container.js";
 import { PARAMS_METADATA, paramsType } from "./decorators/params.js";
-import { BadRequestError, NotFoundError } from "./error.js";
-import { validateDto } from "./pipes/validation.pipe.js";
+import { BadRequestError, ForbiddenError, NotFoundError } from "./error.js";
+import { validateWithSchema } from "./pipes/zod-validation.pipe.js";
+import { requestContext } from "./context/request-context.js";
+import { getEffectiveGuards, Guard } from "./decorators/use-guards.js";
+import { ExceptionFilter } from "./filters/exception.filter.js";
+import { ZodType } from "zod";
+import { Constructor } from "./container.js";
+import { getEffectiveInterceptors, Interceptor } from "./decorators/use-interceptors.js";
 
-type ParamMeta = { type: paramsType; name?: string };
+type ParamMeta = { type: paramsType; name?: string; schema?: ZodType };
 
 type Ctx = {
     req: IncomingMessage;
@@ -14,7 +20,9 @@ type Ctx = {
     route?: Route;
     params?: Record<string, string>;
     paramsMeta?: Map<number, ParamMeta>;
-    paramTypes?: any[];
+    guards?: Constructor<Guard>[];
+    interceptors?: Constructor<Interceptor>[];
+    interceptorState?: Map<Constructor<Interceptor>, unknown>;
     body?: unknown;
     args?: any[];
     controllerInstance?: any;
@@ -24,6 +32,8 @@ type Ctx = {
 type Stage = (ctx: Ctx) => Ctx | Promise<Ctx>;
 
 export class Dispatcher {
+    private readonly exceptionFilter = new ExceptionFilter();
+
     constructor(
         private readonly router: Router,
         private readonly container: Container
@@ -48,7 +58,7 @@ export class Dispatcher {
     private findRoute = (ctx: Ctx): Ctx => {
         const { route, params } = this.router.find(ctx.req.method ?? 'GET', ctx.url.pathname);
 
-        if (!route) throw new NotFoundError('Not Found');
+        if (!route) throw new NotFoundError(`Route ${ctx.req.method ?? 'GET'} ${ctx.url.pathname} not found`);
 
         return { ...ctx, route, params };
     }
@@ -57,46 +67,87 @@ export class Dispatcher {
         const paramsMeta: Map<number, ParamMeta> =
             Reflect.getOwnMetadata(PARAMS_METADATA, ctx.route!.controller.prototype, ctx.route!.handler) ?? new Map();
 
-        const paramTypes =
-            Reflect.getMetadata('design:paramtypes', ctx.route!.controller.prototype, ctx.route!.handler) ?? [];
-
-        return { ...ctx, paramsMeta, paramTypes };
+        return { ...ctx, paramsMeta };
     }
 
-    private parseBody = async (ctx: Ctx): Promise<Ctx> => {
+    private readGuards = (ctx: Ctx): Ctx => {
+        return { ...ctx, guards: getEffectiveGuards(ctx.route!.controller, ctx.route!.handler) };
+    }
+
+    private middleware = (ctx: Ctx): Ctx => {
+        requestContext.mark('middleware');
+        return ctx;
+    }
+
+    private guard = (ctx: Ctx): Ctx => {
+        requestContext.mark('guard');
+
+        for (const GuardClass of ctx.guards!) {
+            const guard = this.container.resolve(GuardClass);
+
+            if (!guard.canActivate(ctx.req)) {
+                throw new ForbiddenError('Forbidden');
+            }
+        }
+
+        return ctx;
+    }
+
+    private interceptorBefore = (ctx: Ctx): Ctx => {
+        requestContext.mark('interceptor:before');
+
+        const interceptors = getEffectiveInterceptors(ctx.route!.controller, ctx.route!.handler);
+        const interceptorState = new Map<Constructor<Interceptor>, unknown>();
+
+        for (const InterceptorClass of interceptors) {
+            const interceptor = this.container.resolve(InterceptorClass);
+            interceptorState.set(InterceptorClass, interceptor.before(ctx.req, ctx.res));
+        }
+
+        return { ...ctx, interceptors, interceptorState };
+    }
+
+    private pipe = async (ctx: Ctx): Promise<Ctx> => {
+        requestContext.mark('pipe');
+
         const needsBody = [...ctx.paramsMeta!.values()].some(p => p.type === 'body');
         const body = needsBody ? await this.readBody(ctx.req) : undefined;
 
-        return { ...ctx, body };
-    }
-
-    private resolveController = (ctx: Ctx): Ctx => {
-        const controllerInstance = this.container.resolve(ctx.route!.controller);
-
-        return { ...ctx, controllerInstance };
-    }
-
-    private buildArgs = async (ctx: Ctx): Promise<Ctx> => {
         const args: any[] = [];
 
         for (const [index, param] of ctx.paramsMeta!.entries()) {
             if (param.type === paramsType.param) args[index] = ctx.params![param.name!];
             if (param.type === paramsType.query) args[index] = ctx.url.searchParams.get(param.name!);
             if (param.type === paramsType.body) {
-                const Dto = ctx.paramTypes![index];
-                args[index] = (Dto && Dto !== Object)
-                    ? await validateDto(Dto, ctx.body)
-                    : ctx.body;
+                args[index] = param.schema
+                    ? validateWithSchema(param.schema, body)
+                    : body;
             }
         }
 
-        return { ...ctx, args };
+        return { ...ctx, body, args };
     }
 
-    private handle = async (ctx: Ctx): Promise<Ctx> => {
-        const result = await ctx.controllerInstance[ctx.route!.handler](...ctx.args!);
+    private handler = async (ctx: Ctx): Promise<Ctx> => {
+        requestContext.mark('handler');
 
-        return { ...ctx, result };
+        const controllerInstance = this.container.resolve(ctx.route!.controller);
+        const result = await controllerInstance[ctx.route!.handler](...ctx.args!);
+
+        return { ...ctx, controllerInstance, result };
+    }
+
+    private interceptorAfter = (ctx: Ctx): Ctx => {
+        requestContext.mark('interceptor:after');
+
+        for (const InterceptorClass of [...ctx.interceptors!].reverse()) {
+            const interceptor = this.container.resolve(InterceptorClass);
+            const state = ctx.interceptorState!.get(InterceptorClass);
+
+            interceptor.after(state, ctx.req, ctx.res);
+        }
+
+        return ctx;
     }
 
     private serializeResponse = (ctx: Ctx): Ctx => {
@@ -109,25 +160,15 @@ export class Dispatcher {
     private readonly stages: Stage[] = [
         this.findRoute,
         this.readParamsMeta,
-        this.parseBody,
-        this.resolveController,
-        this.buildArgs,
-        this.handle,
+        this.readGuards,
+        this.middleware,
+        this.guard,
+        this.interceptorBefore,
+        this.pipe,
+        this.handler,
+        this.interceptorAfter,
         this.serializeResponse,
     ];
-
-    private respondWithError(e: unknown, res: ServerResponse) {
-        if (e instanceof NotFoundError) {
-            res.writeHead(404, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: e.message }));
-        } else if (e instanceof BadRequestError) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: e.message, details: e.details }));
-        } else {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end();
-        }
-    }
 
     async dispatch(
         req: IncomingMessage,
@@ -138,14 +179,23 @@ export class Dispatcher {
             `http://${req.headers.host ?? 'localhost'}`
         )
 
-        let ctx: Ctx = { req, res, url };
+        const incomingRequestId = req.headers['x-request-id'];
 
-        try {
-            for (const stage of this.stages) {
-                ctx = await stage(ctx);
+        await requestContext.run(
+            Array.isArray(incomingRequestId) ? incomingRequestId[0] : incomingRequestId,
+            async () => {
+                res.setHeader('X-Request-Id', requestContext.requestId);
+
+                let ctx: Ctx = { req, res, url };
+
+                try {
+                    for (const stage of this.stages) {
+                        ctx = await stage(ctx);
+                    }
+                } catch (e) {
+                    this.exceptionFilter.catch(e, res);
+                }
             }
-        } catch (e) {
-            this.respondWithError(e, res);
-        }
+        );
     }
 }
