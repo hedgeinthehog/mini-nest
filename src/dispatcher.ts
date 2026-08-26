@@ -166,8 +166,6 @@ export class Dispatcher {
         this.interceptorBefore,
         this.pipe,
         this.handler,
-        this.interceptorAfter,
-        this.serializeResponse,
     ];
 
     async dispatch(
@@ -179,21 +177,34 @@ export class Dispatcher {
             `http://${req.headers.host ?? 'localhost'}`
         )
 
-        const incomingRequestId = req.headers['x-request-id'];
+        let incomingRequestId = req.headers['x-request-id'];
+        if (Array.isArray(incomingRequestId)) incomingRequestId = incomingRequestId.join(', ');
+        incomingRequestId = !!incomingRequestId ? incomingRequestId.split(',')[0].trim() : undefined;
 
         await requestContext.run(
-            Array.isArray(incomingRequestId) ? incomingRequestId[0] : incomingRequestId,
+            incomingRequestId,
             async () => {
                 res.setHeader('X-Request-Id', requestContext.requestId);
 
                 let ctx: Ctx = { req, res, url };
+                let caught: unknown;
 
                 try {
                     for (const stage of this.stages) {
                         ctx = await stage(ctx);
                     }
                 } catch (e) {
-                    this.exceptionFilter.catch(e, res);
+                    caught = e;
+                } finally {
+                    if (ctx.interceptors) {
+                        this.interceptorAfter(ctx);
+                    }
+                }
+
+                if (caught) {
+                    this.exceptionFilter.catch(caught, res);
+                } else {
+                    this.serializeResponse(ctx);
                 }
             }
         );

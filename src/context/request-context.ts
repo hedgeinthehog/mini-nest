@@ -11,7 +11,7 @@ class RequestContext {
 
     run<T>(incomingRequestId: string | undefined, callback: () => T): T {
         const store: RequestStore = {
-            requestId: incomingRequestId ?? randomUUID(),
+            requestId: !!incomingRequestId ? incomingRequestId : randomUUID(),
             trace: [],
         }
 
